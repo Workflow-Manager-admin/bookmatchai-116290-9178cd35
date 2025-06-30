@@ -1,19 +1,86 @@
-from fastapi import FastAPI, Depends, HTTPException, Request, Body
+from fastapi import FastAPI, Depends, HTTPException, Request, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, List
+from pydantic import BaseModel, Field
+from datetime import datetime, timedelta
 import json
 
 # Import our modules
 from ..database import get_db, create_tables
-from ..models import User, Book
+from ..models import (
+    User, Book, SwapOffer, Notification,
+    BookCondition, SwapOfferStatus
+)
 from ..auth import (
     get_current_user,
     get_optional_current_user,
     verify_webhook_signature,
     ClerkAuthError
 )
+
+
+# Pydantic models for request validation
+class BookCreateRequest(BaseModel):
+    title: str = Field(..., description="Book title")
+    author: str = Field(..., description="Book author")
+    isbn: Optional[str] = Field(None, description="ISBN number")
+    genre: Optional[str] = Field(None, description="Book genre")
+    description: Optional[str] = Field(None, description="Book description")
+    condition: str = Field(..., description="Book condition")
+    publication_year: Optional[int] = Field(None, description="Publication year")
+    publisher: Optional[str] = Field(None, description="Publisher name")
+    language: str = Field("English", description="Book language")
+    page_count: Optional[int] = Field(None, description="Number of pages")
+    is_giveaway: bool = Field(False, description="Whether this is a giveaway")
+    location: Optional[str] = Field(None, description="Pickup location")
+    tags: Optional[str] = Field(None, description="JSON string of tags")
+
+
+class BookUpdateRequest(BaseModel):
+    title: Optional[str] = Field(None, description="Book title")
+    author: Optional[str] = Field(None, description="Book author")
+    isbn: Optional[str] = Field(None, description="ISBN number")
+    genre: Optional[str] = Field(None, description="Book genre")
+    description: Optional[str] = Field(None, description="Book description")
+    condition: Optional[str] = Field(None, description="Book condition")
+    publication_year: Optional[int] = Field(None, description="Publication year")
+    publisher: Optional[str] = Field(None, description="Publisher name")
+    language: Optional[str] = Field(None, description="Book language")
+    page_count: Optional[int] = Field(None, description="Number of pages")
+    is_giveaway: Optional[bool] = Field(None, description="Whether giveaway")
+    is_available: Optional[bool] = Field(None, description="Whether available")
+    location: Optional[str] = Field(None, description="Pickup location")
+    tags: Optional[str] = Field(None, description="JSON string of tags")
+
+
+class SwapOfferCreateRequest(BaseModel):
+    requested_book_id: int = Field(..., description="ID of requested book")
+    offered_book_ids: Optional[List[int]] = Field(None, description="Offered books")
+    message: Optional[str] = Field(None, description="Message to book owner")
+
+
+class SwapOfferUpdateRequest(BaseModel):
+    status: str = Field(..., description="New status")
+    response_message: Optional[str] = Field(None, description="Response message")
+
+
+class NotificationCreateRequest(BaseModel):
+    title: str = Field(..., description="Notification title")
+    message: str = Field(..., description="Notification message")
+    notification_type: str = Field(..., description="Type of notification")
+    related_entity_id: Optional[int] = Field(None, description="Related entity ID")
+    related_entity_type: Optional[str] = Field(None, description="Entity type")
+    priority: str = Field("normal", description="Priority level")
+
+
+class UserProfileUpdateRequest(BaseModel):
+    bio: Optional[str] = Field(None, description="User biography")
+    location: Optional[str] = Field(None, description="User location")
+    interests: Optional[str] = Field(None, description="User interests JSON")
+    email_notifications: Optional[bool] = Field(None, description="Email prefs")
+
 
 # Create FastAPI app with OpenAPI documentation
 app = FastAPI(
@@ -263,7 +330,7 @@ def get_user_profile(
 
 @app.put("/users/me", tags=["users"])
 def update_user_profile(
-    profile_data: dict,
+    profile_data: UserProfileUpdateRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -281,12 +348,11 @@ def update_user_profile(
     Returns:
         dict: Updated user profile information
     """
-    # Update allowed fields
-    updatable_fields = ["bio", "location", "interests", "email_notifications"]
+    # Update fields that are provided
+    update_data = profile_data.dict(exclude_unset=True)
 
-    for field in updatable_fields:
-        if field in profile_data:
-            setattr(current_user, field, profile_data[field])
+    for field, value in update_data.items():
+        setattr(current_user, field, value)
 
     db.commit()
     db.refresh(current_user)
@@ -357,7 +423,7 @@ def list_books(
 
 @app.post("/books", tags=["books"])
 def create_book_listing(
-    book_data: dict,
+    book_data: BookCreateRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -375,32 +441,21 @@ def create_book_listing(
     Returns:
         dict: Created book listing information
     """
-    from ..models import BookCondition
-
-    # Validate required fields
-    required_fields = ["title", "author", "condition"]
-    for field in required_fields:
-        if field not in book_data:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing required field: {field}"
-            )
-
     # Create book
     book = Book(
-        title=book_data["title"],
-        author=book_data["author"],
-        isbn=book_data.get("isbn"),
-        genre=book_data.get("genre"),
-        description=book_data.get("description"),
-        condition=BookCondition(book_data["condition"]),
-        publication_year=book_data.get("publication_year"),
-        publisher=book_data.get("publisher"),
-        language=book_data.get("language", "English"),
-        page_count=book_data.get("page_count"),
-        is_giveaway=book_data.get("is_giveaway", False),
-        location=book_data.get("location"),
-        tags=book_data.get("tags"),
+        title=book_data.title,
+        author=book_data.author,
+        isbn=book_data.isbn,
+        genre=book_data.genre,
+        description=book_data.description,
+        condition=BookCondition(book_data.condition),
+        publication_year=book_data.publication_year,
+        publisher=book_data.publisher,
+        language=book_data.language,
+        page_count=book_data.page_count,
+        is_giveaway=book_data.is_giveaway,
+        location=book_data.location,
+        tags=book_data.tags,
         owner_id=current_user.id
     )
 
@@ -417,6 +472,147 @@ def create_book_listing(
         "is_giveaway": book.is_giveaway,
         "created_at": book.created_at
     }
+
+
+@app.get("/books/{book_id}", tags=["books"])
+def get_book(
+    book_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user)
+):
+    """
+    Get detailed information about a specific book.
+
+    Args:
+        book_id: ID of the book to retrieve
+        db: Database session
+        current_user: Current user if authenticated
+
+    Returns:
+        dict: Detailed book information
+
+    Raises:
+        HTTPException: If book not found
+    """
+    book = db.query(Book).filter(Book.id == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    return {
+        "id": book.id,
+        "title": book.title,
+        "author": book.author,
+        "isbn": book.isbn,
+        "genre": book.genre,
+        "description": book.description,
+        "condition": book.condition.value,
+        "cover_image_url": book.cover_image_url,
+        "publication_year": book.publication_year,
+        "publisher": book.publisher,
+        "language": book.language,
+        "page_count": book.page_count,
+        "is_available": book.is_available,
+        "is_giveaway": book.is_giveaway,
+        "location": book.location,
+        "tags": book.tags,
+        "owner": {
+            "id": book.owner.id,
+            "username": book.owner.username,
+            "first_name": book.owner.first_name,
+            "last_name": book.owner.last_name
+        },
+        "created_at": book.created_at,
+        "updated_at": book.updated_at
+    }
+
+
+@app.put("/books/{book_id}", tags=["books"])
+def update_book(
+    book_id: int,
+    book_data: BookUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update a book listing.
+
+    Only the book owner can update their book listing.
+
+    Args:
+        book_id: ID of the book to update
+        book_data: Updated book information
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: Updated book information
+
+    Raises:
+        HTTPException: If book not found or user not authorized
+    """
+    book = db.query(Book).filter(Book.id == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    if book.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this book")
+
+    # Update fields that are provided
+    update_data = book_data.dict(exclude_unset=True)
+
+    for field, value in update_data.items():
+        if field == "condition" and value:
+            setattr(book, field, BookCondition(value))
+        else:
+            setattr(book, field, value)
+
+    db.commit()
+    db.refresh(book)
+
+    return {
+        "id": book.id,
+        "title": book.title,
+        "author": book.author,
+        "condition": book.condition.value,
+        "is_available": book.is_available,
+        "is_giveaway": book.is_giveaway,
+        "updated_at": book.updated_at
+    }
+
+
+@app.delete("/books/{book_id}", tags=["books"])
+def delete_book(
+    book_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a book listing.
+
+    Only the book owner can delete their book listing.
+
+    Args:
+        book_id: ID of the book to delete
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: Success confirmation
+
+    Raises:
+        HTTPException: If book not found or user not authorized
+    """
+    book = db.query(Book).filter(Book.id == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    if book.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this book")
+
+    db.delete(book)
+    db.commit()
+
+    return {"message": "Book deleted successfully"}
 
 
 @app.get("/books/my", tags=["books"])
@@ -455,6 +651,486 @@ def get_user_books(
             for book in books
         ]
     }
+
+
+# Swap offer endpoints
+@app.post("/swap-offers", tags=["swaps"])
+def create_swap_offer(
+    offer_data: SwapOfferCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new swap offer.
+
+    Authenticated users can create swap offers for books they want.
+    The offer can include books they're willing to trade or be a giveaway request.
+
+    Args:
+        offer_data: Swap offer information
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: Created swap offer information
+
+    Raises:
+        HTTPException: If requested book not found or not available
+    """
+    # Verify requested book exists and is available
+    requested_book = db.query(Book).filter(
+        Book.id == offer_data.requested_book_id,
+        Book.is_available.is_(True)
+    ).first()
+
+    if not requested_book:
+        raise HTTPException(
+            status_code=404,
+            detail="Requested book not found or not available"
+        )
+
+    if requested_book.owner_id == current_user.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot create swap offer for your own book"
+        )
+
+    # Verify offered books exist and belong to current user (if any)
+    offered_book_ids_json = None
+    if offer_data.offered_book_ids:
+        for book_id in offer_data.offered_book_ids:
+            offered_book = db.query(Book).filter(
+                Book.id == book_id,
+                Book.owner_id == current_user.id,
+                Book.is_available.is_(True)
+            ).first()
+            if not offered_book:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Offered book {book_id} not found or not available"
+                )
+        offered_book_ids_json = json.dumps(offer_data.offered_book_ids)
+
+    # Create swap offer
+    swap_offer = SwapOffer(
+        requester_id=current_user.id,
+        recipient_id=requested_book.owner_id,
+        requested_book_id=offer_data.requested_book_id,
+        offered_book_ids=offered_book_ids_json,
+        message=offer_data.message,
+        expires_at=datetime.utcnow() + timedelta(days=7)  # Expire in 7 days
+    )
+
+    db.add(swap_offer)
+    db.commit()
+    db.refresh(swap_offer)
+
+    return {
+        "id": swap_offer.id,
+        "requester_id": swap_offer.requester_id,
+        "recipient_id": swap_offer.recipient_id,
+        "requested_book_id": swap_offer.requested_book_id,
+        "offered_book_ids": swap_offer.offered_book_ids,
+        "message": swap_offer.message,
+        "status": swap_offer.status.value,
+        "expires_at": swap_offer.expires_at,
+        "created_at": swap_offer.created_at
+    }
+
+
+@app.get("/swap-offers", tags=["swaps"])
+def list_swap_offers(
+    type: str = Query("received", description="Type: 'sent' or 'received'"),
+    skip: int = Query(0, description="Number of records to skip"),
+    limit: int = Query(20, description="Maximum number of records to return"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    List swap offers for the current user.
+
+    Returns either sent offers (offers made by current user) or received offers
+    (offers made to current user) based on the type parameter.
+
+    Args:
+        type: Type of offers to list ('sent' or 'received')
+        skip: Number of records to skip (pagination)
+        limit: Maximum number of records to return
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: List of swap offers with metadata
+    """
+    if type == "sent":
+        query = db.query(SwapOffer).filter(SwapOffer.requester_id == current_user.id)
+    elif type == "received":
+        query = db.query(SwapOffer).filter(SwapOffer.recipient_id == current_user.id)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid type parameter. Use 'sent' or 'received'"
+        )
+
+    total = query.count()
+    offers = query.offset(skip).limit(limit).all()
+
+    return {
+        "offers": [
+            {
+                "id": offer.id,
+                "requester": {
+                    "id": offer.requester.id,
+                    "username": offer.requester.username,
+                    "first_name": offer.requester.first_name,
+                    "last_name": offer.requester.last_name
+                },
+                "recipient": {
+                    "id": offer.recipient.id,
+                    "username": offer.recipient.username,
+                    "first_name": offer.recipient.first_name,
+                    "last_name": offer.recipient.last_name
+                },
+                "requested_book": {
+                    "id": offer.requested_book.id,
+                    "title": offer.requested_book.title,
+                    "author": offer.requested_book.author
+                },
+                "offered_book_ids": offer.offered_book_ids,
+                "message": offer.message,
+                "status": offer.status.value,
+                "response_message": offer.response_message,
+                "expires_at": offer.expires_at,
+                "created_at": offer.created_at,
+                "updated_at": offer.updated_at
+            }
+            for offer in offers
+        ],
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "type": type
+    }
+
+
+@app.get("/swap-offers/{offer_id}", tags=["swaps"])
+def get_swap_offer(
+    offer_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get detailed information about a specific swap offer.
+
+    Only the requester or recipient can view the offer details.
+
+    Args:
+        offer_id: ID of the swap offer to retrieve
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: Detailed swap offer information
+
+    Raises:
+        HTTPException: If offer not found or user not authorized
+    """
+    offer = db.query(SwapOffer).filter(SwapOffer.id == offer_id).first()
+    if not offer:
+        raise HTTPException(status_code=404, detail="Swap offer not found")
+
+    if (offer.requester_id != current_user.id and
+            offer.recipient_id != current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized to view this offer")
+
+    # Get offered books details if any
+    offered_books = []
+    if offer.offered_book_ids:
+        offered_book_ids = json.loads(offer.offered_book_ids)
+        offered_books = db.query(Book).filter(Book.id.in_(offered_book_ids)).all()
+
+    return {
+        "id": offer.id,
+        "requester": {
+            "id": offer.requester.id,
+            "username": offer.requester.username,
+            "first_name": offer.requester.first_name,
+            "last_name": offer.requester.last_name,
+            "location": offer.requester.location
+        },
+        "recipient": {
+            "id": offer.recipient.id,
+            "username": offer.recipient.username,
+            "first_name": offer.recipient.first_name,
+            "last_name": offer.recipient.last_name,
+            "location": offer.recipient.location
+        },
+        "requested_book": {
+            "id": offer.requested_book.id,
+            "title": offer.requested_book.title,
+            "author": offer.requested_book.author,
+            "condition": offer.requested_book.condition.value,
+            "is_giveaway": offer.requested_book.is_giveaway
+        },
+        "offered_books": [
+            {
+                "id": book.id,
+                "title": book.title,
+                "author": book.author,
+                "condition": book.condition.value
+            }
+            for book in offered_books
+        ],
+        "message": offer.message,
+        "status": offer.status.value,
+        "response_message": offer.response_message,
+        "match_score": offer.match_score,
+        "expires_at": offer.expires_at,
+        "created_at": offer.created_at,
+        "updated_at": offer.updated_at,
+        "completed_at": offer.completed_at
+    }
+
+
+@app.put("/swap-offers/{offer_id}", tags=["swaps"])
+def update_swap_offer(
+    offer_id: int,
+    update_data: SwapOfferUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update a swap offer status.
+
+    Only the recipient can accept/reject offers. Both parties can cancel.
+
+    Args:
+        offer_id: ID of the swap offer to update
+        update_data: Update information including status
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: Updated swap offer information
+
+    Raises:
+        HTTPException: If offer not found or user not authorized
+    """
+    offer = db.query(SwapOffer).filter(SwapOffer.id == offer_id).first()
+    if not offer:
+        raise HTTPException(status_code=404, detail="Swap offer not found")
+
+    # Validate authorization based on status change
+    new_status = SwapOfferStatus(update_data.status)
+
+    if new_status in [SwapOfferStatus.ACCEPTED, SwapOfferStatus.REJECTED]:
+        if offer.recipient_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the recipient can accept or reject offers"
+            )
+    elif new_status == SwapOfferStatus.CANCELLED:
+        if (offer.requester_id != current_user.id and
+                offer.recipient_id != current_user.id):
+            raise HTTPException(
+                status_code=403,
+                detail="Only requester or recipient can cancel offers"
+            )
+    elif new_status == SwapOfferStatus.COMPLETED:
+        if offer.recipient_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the recipient can mark offers as completed"
+            )
+
+    # Update offer
+    offer.status = new_status
+    if update_data.response_message:
+        offer.response_message = update_data.response_message
+
+    if new_status == SwapOfferStatus.COMPLETED:
+        offer.completed_at = datetime.utcnow()
+        # Mark requested book as unavailable
+        offer.requested_book.is_available = False
+        # Mark offered books as unavailable if any
+        if offer.offered_book_ids:
+            offered_book_ids = json.loads(offer.offered_book_ids)
+            db.query(Book).filter(Book.id.in_(offered_book_ids)).update(
+                {"is_available": False}, synchronize_session=False
+            )
+
+    db.commit()
+    db.refresh(offer)
+
+    return {
+        "id": offer.id,
+        "status": offer.status.value,
+        "response_message": offer.response_message,
+        "updated_at": offer.updated_at,
+        "completed_at": offer.completed_at
+    }
+
+
+# Notification endpoints
+@app.get("/notifications", tags=["notifications"])
+def list_notifications(
+    skip: int = Query(0, description="Number of records to skip"),
+    limit: int = Query(20, description="Maximum number of records to return"),
+    unread_only: bool = Query(False, description="Return only unread notifications"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    List notifications for the current user.
+
+    Returns paginated list of notifications for the authenticated user.
+
+    Args:
+        skip: Number of records to skip (pagination)
+        limit: Maximum number of records to return
+        unread_only: Whether to return only unread notifications
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: List of notifications with metadata
+    """
+    query = db.query(Notification).filter(Notification.user_id == current_user.id)
+
+    if unread_only:
+        query = query.filter(Notification.is_read.is_(False))
+
+    query = query.order_by(Notification.created_at.desc())
+
+    total = query.count()
+    notifications = query.offset(skip).limit(limit).all()
+
+    return {
+        "notifications": [
+            {
+                "id": notification.id,
+                "title": notification.title,
+                "message": notification.message,
+                "notification_type": notification.notification_type.value,
+                "related_entity_id": notification.related_entity_id,
+                "related_entity_type": notification.related_entity_type,
+                "is_read": notification.is_read,
+                "priority": notification.priority,
+                "metadata": notification.metadata,
+                "created_at": notification.created_at,
+                "read_at": notification.read_at
+            }
+            for notification in notifications
+        ],
+        "total": total,
+        "unread_count": db.query(Notification).filter(
+            Notification.user_id == current_user.id,
+            Notification.is_read.is_(False)
+        ).count(),
+        "skip": skip,
+        "limit": limit
+    }
+
+
+@app.put("/notifications/{notification_id}/read", tags=["notifications"])
+def mark_notification_read(
+    notification_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Mark a notification as read.
+
+    Args:
+        notification_id: ID of the notification to mark as read
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: Success confirmation
+
+    Raises:
+        HTTPException: If notification not found or user not authorized
+    """
+    notification = db.query(Notification).filter(
+        Notification.id == notification_id,
+        Notification.user_id == current_user.id
+    ).first()
+
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    notification.is_read = True
+    notification.read_at = datetime.utcnow()
+
+    db.commit()
+
+    return {"message": "Notification marked as read"}
+
+
+@app.put("/notifications/read-all", tags=["notifications"])
+def mark_all_notifications_read(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Mark all notifications as read for the current user.
+
+    Args:
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: Success confirmation with count of notifications marked
+    """
+    updated_count = db.query(Notification).filter(
+        Notification.user_id == current_user.id,
+        Notification.is_read.is_(False)
+    ).update(
+        {"is_read": True, "read_at": datetime.utcnow()},
+        synchronize_session=False
+    )
+
+    db.commit()
+
+    return {
+        "message": f"Marked {updated_count} notifications as read",
+        "count": updated_count
+    }
+
+
+@app.delete("/notifications/{notification_id}", tags=["notifications"])
+def delete_notification(
+    notification_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a notification.
+
+    Args:
+        notification_id: ID of the notification to delete
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        dict: Success confirmation
+
+    Raises:
+        HTTPException: If notification not found or user not authorized
+    """
+    notification = db.query(Notification).filter(
+        Notification.id == notification_id,
+        Notification.user_id == current_user.id
+    ).first()
+
+    if not notification:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    db.delete(notification)
+    db.commit()
+
+    return {"message": "Notification deleted successfully"}
 
 
 # Custom exception handler for authentication errors
